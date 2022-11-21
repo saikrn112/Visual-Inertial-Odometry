@@ -7,7 +7,6 @@ from image import ImageProcessor
 from msckf import MSCKF
 
 
-
 class VIO(object):
     def __init__(self, config, img_queue, imu_queue, viewer=None):
         self.config = config

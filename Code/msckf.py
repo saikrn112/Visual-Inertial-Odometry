@@ -1,12 +1,10 @@
-import numpy as np
-from scipy.stats import chi2
-
-from utils import *
-from feature import Feature
-
 import time
 from collections import namedtuple
 
+from scipy.stats import chi2
+
+from feature import Feature
+from utils import *
 
 
 class IMUState(object):
@@ -123,6 +121,8 @@ class MSCKF(object):
         # But the initial velocity and bias can be set by parameters.
         # TODO: is it reasonable to set the initial bias to 0?
         self.state_server.imu_state.velocity = config.velocity
+        # TODO: Check if config.velocity is wrt IMU frame or global frame
+
         self.reset_state_cov()
 
         continuous_noise_cov = np.identity(12)
@@ -238,15 +238,18 @@ class MSCKF(object):
         """
         # Initialize the gyro_bias given the current angular and linear velocity
         ...
+        #TODO What's the use of curr ang, lin vel?
 
         # Find the gravity in the IMU frame.
         ...
         
         # Normalize the gravity and save to IMUState          
         ...
+        # TODO Do we need to estimate acc bias?
 
         # Initialize the initial orientation, so that the estimation
         # is consistent with the inertial frame.
+        # TODO What if initial orientation is not aligning with gravity vec
         ...
 
     # Filter related functions
