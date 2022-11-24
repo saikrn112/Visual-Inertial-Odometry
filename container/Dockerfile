@@ -1,0 +1,50 @@
+## ROS2
+FROM tensorflow/tensorflow:2.10.0-gpu
+WORKDIR /root
+RUN apt update -y
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/New_York
+RUN apt install -y \
+            software-properties-common \
+            usbutils \
+            tree \
+            vim \
+            less \
+            htop \
+            wget \
+            curl \
+            zsh \
+            git
+RUN apt update -y
+RUN apt upgrade -y
+
+# customizations
+RUN wget -nv -O - https://raw.githubusercontent.com/zimfw/install/master/install.zsh | zsh
+RUN wget https://gist.githubusercontent.com/saikrn112/b55bf8a8bad6f6538a40561bdafe45bc/raw/8ad92e6c07858266b6740790212c6b518e3a028b/.vimrc
+RUN wget -O - https://gist.githubusercontent.com/saikrn112/1e353283a091824bb0074c7aafe203fe/raw/zimrc-components >> .zimrc
+RUN /usr/bin/zsh /root/.zim/zimfw.zsh install
+RUN wget -O - https://gist.githubusercontent.com/saikrn112/b9d16ad838fc240fe7370697039eb56c/raw/62d0ef0fabce1781c818b26b2a2acfe190ebc8fa/alias.sh >> .zshrc
+
+# useful libraries
+RUN python -m pip install --upgrade pip
+RUN pip3 install opencv-python matplotlib scipy
+RUN pip3 install scikit-image tqdm sklearn scikit-learn tflite-runtime
+
+# edge tpu related libraries
+RUN echo "deb https://packages.cloud.google.com/apt coral-edgetpu-stable main" | tee /etc/apt/sources.list.d/coral-edgetpu.list
+RUN curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+RUN apt-get update -y
+RUN apt-get install libglu1-mesa libxi-dev libxmu-dev libglu1-mesa-dev -y
+RUN apt-get install libedgetpu1-std python3-pycoral edgetpu-compiler -y
+
+RUN apt-get install libglew-dev -y
+RUN apt-get install libglu1-mesa-dev freeglut3-dev mesa-common-dev -y
+RUN apt-get install libeigen3-dev -y
+RUN pip3 install cmake pyopengl
+COPY ./build_pangolin.sh /root/
+RUN mkdir /usr/lib/python3.8/site-packages/
+ENV PYTHONPATH "${PYTHONPATH}:/usr/lib/python3.8/site-packages/"
+
+CMD ["zsh"]
+LABEL maintainer="saikrn112@gmail.com"
+
