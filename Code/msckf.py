@@ -6,6 +6,8 @@ from scipy.stats import chi2
 from feature import Feature
 from utils import *
 
+from scipy.spatial.transform import Rotation
+
 
 class IMUState(object):
     # id for next IMU state
@@ -51,6 +53,10 @@ class IMUState(object):
         # Transformation between the IMU and the left camera (cam0)
         self.R_imu_cam0 = np.identity(3)
         self.t_cam0_imu = np.zeros(3)
+    
+    @classmethod
+    def update_static_gravity(cls, new_gravity):
+        cls.gravity = new_gravity  # 3,
 
 
 class CAMState(object):
@@ -237,11 +243,33 @@ class MSCKF(object):
         first few IMU readings.
         """
         # Initialize the gyro_bias given the current angular and linear velocity
-        ...
-        #TODO What's the use of curr ang, lin vel?
 
-        # Find the gravity in the IMU frame.
-        ...
+        buffer_len = len(self.imu_msg_buffer)
+        angular_vel_sum = np.zeros(3)
+        accel_sum = np.zeros(3)
+        
+        for imu_msg in self.imu_msg_buffer:
+            angular_vel_sum += imu_msg.angular_velocity  # 3,
+            accel_sum += imu_msg.accel_sum  # 3,
+        
+        self.state_server.imu_state.gyro_bias = angular_vel_sum / buffer_len
+
+        # Find gravity in inertial frame
+        gravity_imu = accel_sum / buffer_len  # 3,
+
+        gravity_norm = np.linalg.norm(gravity_imu)  # 1,
+        static_gravity = np.array([0.0, 0.0, -gravity_norm])
+        IMUState.update_static_gravity(static_gravity)
+
+        # Find the gravity in the IMU frame
+        gravity_imu = gravity_imu.reshape((1,3))
+        static_gravity = static_gravity.reshape((1,3))
+        R_i_w = Rotation.align_vectors(gravity_imu, static_gravity).as_matrix()
+
+        R_w_i = R_i_w.T
+        print(R_w_i)
+        exit(1)
+
         
         # Normalize the gravity and save to IMUState          
         ...
