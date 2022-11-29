@@ -22,9 +22,9 @@ class VIO(object):
         self.img_thread = Thread(target=self.process_img)
         self.imu_thread = Thread(target=self.process_imu)
         self.vio_thread = Thread(target=self.process_feature)
-        self.img_thread.start()
+        # self.img_thread.start()
         self.imu_thread.start()
-        self.vio_thread.start()
+        # self.vio_thread.start()
 
     def process_img(self):
         while True:

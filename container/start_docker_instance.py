@@ -25,7 +25,7 @@ def create_docker_instance(name,args):
     if args.workspace:
         vio_volume = args.workspace
     elif platform == "linux" or platform == "linux2":
-        vio_volume = f"{ENV_HOME}/Personal/vio/"
+        vio_volume = f"{ENV_HOME}/Personal/computer_vision/vio"
 
     cmd= f"docker run --name {name} {options} -v {vio_volume}:/root/vio/ somidi/vio:v1 /usr/bin/zsh"
     print(cmd)

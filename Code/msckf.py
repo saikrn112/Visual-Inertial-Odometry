@@ -7,7 +7,22 @@ from feature import Feature
 from utils import *
 
 from scipy.spatial.transform import Rotation
+import sys
 
+
+def rotation_matrix_from_vectors(vec1, vec2):
+    """ Find the rotation matrix that aligns vec1 to vec2
+    :param vec1: A 3d "source" vector
+    :param vec2: A 3d "destination" vector
+    :return mat: A transform matrix (3x3) which when applied to vec1, aligns it with vec2.
+    """
+    a, b = (vec1 / np.linalg.norm(vec1)).reshape(3), (vec2 / np.linalg.norm(vec2)).reshape(3)
+    v = np.cross(a, b)
+    c = np.dot(a, b)
+    s = np.linalg.norm(v)
+    kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+    return rotation_matrix
 
 class IMUState(object):
     # id for next IMU state
@@ -250,13 +265,14 @@ class MSCKF(object):
         
         for imu_msg in self.imu_msg_buffer:
             angular_vel_sum += imu_msg.angular_velocity  # 3,
-            accel_sum += imu_msg.accel_sum  # 3,
+            accel_sum += imu_msg.linear_acceleration  # 3,
         
         self.state_server.imu_state.gyro_bias = angular_vel_sum / buffer_len
 
         # Find gravity in inertial frame
         gravity_imu = accel_sum / buffer_len  # 3,
 
+        # Normalize the gravity and save to IMUState          
         gravity_norm = np.linalg.norm(gravity_imu)  # 1,
         static_gravity = np.array([0.0, 0.0, -gravity_norm])
         IMUState.update_static_gravity(static_gravity)
@@ -264,21 +280,15 @@ class MSCKF(object):
         # Find the gravity in the IMU frame
         gravity_imu = gravity_imu.reshape((1,3))
         static_gravity = static_gravity.reshape((1,3))
-        R_i_w = Rotation.align_vectors(gravity_imu, static_gravity).as_matrix()
-
+        R_i_w = Rotation.align_vectors(gravity_imu, -static_gravity)[0].as_matrix()  #TODO NED frame
         R_w_i = R_i_w.T
-        print(R_w_i)
-        exit(1)
-
         
-        # Normalize the gravity and save to IMUState          
-        ...
-        # TODO Do we need to estimate acc bias?
+        q_w_i = Rotation.from_matrix(R_w_i).as_quat()
 
         # Initialize the initial orientation, so that the estimation
         # is consistent with the inertial frame.
-        # TODO What if initial orientation is not aligning with gravity vec
-        ...
+        self.state_server.imu_state.orientation = q_w_i
+
 
     # Filter related functions
     # (batch_imu_processing, process_model, predict_new_state)
@@ -290,51 +300,108 @@ class MSCKF(object):
         Process the imu message given the time bound
         """
         # Process the imu messages in the imu_msg_buffer 
-        # Execute process model.
-        # Update the state info
-        # Repeat until the time_bound is reached
-        ...
-        
+        n_used_imu_msgs = 0
+        for imu_msg in self.imu_msg_buffer:
+            imu_time = imu_msg.timestamp
+
+            if imu_time < self.state_server.imu_state.timestamp:
+                n_used_imu_msgs += 1
+                continue
+            
+            # Repeat until the time_bound is reached
+            if imu_time > time_bound:
+                break
+
+            # Execute process model.
+            self.process_model(imu_time, imu_msg.angular_velocity, imu_msg.linear_acceleration)
+            n_used_imu_msgs += 1
+
+            # Update the state info
+            self.state_server.imu_state.timestamp = imu_time
+
         # Set the current imu id to be the IMUState.next_id
-        ...
+        self.state_server.imu_state.id = IMUState.next_id
         
         # IMUState.next_id increments
-        ...
+        IMUState.next_id += 1
 
         # Remove all used IMU msgs.
-        ...
+        self.imu_msg_buffer = self.imu_msg_buffer[n_used_imu_msgs:]
 
     def process_model(self, time, m_gyro, m_acc):
         """
-        IMPLEMENT THIS!!!!!
-        """
-        """
         Section III.A: The dynamics of the error IMU state following equation (2) in the "MSCKF" paper.
         """
-        # Get the error IMU state
-        ...
+        imu_state = self.state_server.imu_state
+        dt = time - imu_state.timestamp
 
-        # Compute discrete transition F, Q matrices in Appendix A in "MSCKF" paper
-        ...
-        
+        gyro_ang_vel = m_gyro - imu_state.gyro_bias
+        accel = m_acc - imu_state.acc_bias
+
+        # Compute discrete transition and noise covariance matrix
+        F = np.zeros((21, 21))
+        G = np.zeros((21, 12))
+
+        R_w_i = to_rotation(imu_state.orientation)
+
+        F[:3, :3] = -skew(gyro_ang_vel)
+        F[:3, 3:6] = -np.identity(3)
+        F[6:9, :3] = -R_w_i.T @ skew(accel)
+        F[6:9, 9:12] = -R_w_i.T
+        F[12:15, 6:9] = np.identity(3)
+
+        G[:3, :3] = -np.identity(3)
+        G[3:6, 3:6] = np.identity(3)
+        G[6:9, 6:9] = -R_w_i.T
+        G[9:12, 9:12] = np.identity(3)
+
         # Approximate matrix exponential to the 3rd order, which can be 
         # considered to be accurate enough assuming dt is within 0.01s.
-        ...
+        Fdt = F * dt
+        Fdt_square = Fdt @ Fdt
+        Fdt_cube = Fdt_square @ Fdt
+        Phi = np.identity(21) + Fdt + Fdt_square/2. + Fdt_cube/6.
 
         # Propogate the state using 4th order Runge-Kutta
-        self.predict_new_state(dt, gyro, acc)
+        self.predict_new_state(dt, gyro_ang_vel, accel)
 
         # Modify the transition matrix
-        ...
+        R_kk_1 = to_rotation(imu_state.orientation_null)
+        Phi[:3, :3] = to_rotation(imu_state.orientation) @ R_kk_1.T
+
+        u = R_kk_1 @ IMUState.gravity
+        # s = (u.T @ u).inverse() @ u.T
+        # s = np.linalg.inv(u[:, None] * u) @ u
+        s = u / (u @ u)
+
+        A1 = Phi[6:9, :3]
+        w1 = skew(imu_state.velocity_null - imu_state.velocity) @ IMUState.gravity
+        Phi[6:9, :3] = A1 - (A1 @ u - w1)[:, None] * s
+
+        A2 = Phi[12:15, :3]
+        w2 = skew(dt*imu_state.velocity_null+imu_state.position_null - 
+            imu_state.position) @ IMUState.gravity
+        Phi[12:15, :3] = A2 - (A2 @ u - w2)[:, None] * s
 
         # Propogate the state covariance matrix.
-        ...
+        Q = Phi @ G @ self.state_server.continuous_noise_cov @ G.T @ Phi.T * dt
+        self.state_server.state_cov[:21, :21] = (
+            Phi @ self.state_server.state_cov[:21, :21] @ Phi.T + Q)
+
+        if len(self.state_server.cam_states) > 0:
+            self.state_server.state_cov[:21, 21:] = (
+                Phi @ self.state_server.state_cov[:21, 21:])
+            self.state_server.state_cov[21:, :21] = (
+                self.state_server.state_cov[21:, :21] @ Phi.T)
 
         # Fix the covariance to be symmetric
-        ...
-        
+        self.state_server.state_cov = (
+            self.state_server.state_cov + self.state_server.state_cov.T) / 2.
+
         # Update the state correspondes to null space.
-        ...
+        self.state_server.imu_state.orientation_null = imu_state.orientation
+        self.state_server.imu_state.position_null = imu_state.position
+        self.state_server.imu_state.velocity_null = imu_state.velocity
         
 
     def predict_new_state(self, dt, gyro, acc):
@@ -342,36 +409,64 @@ class MSCKF(object):
         IMPLEMENT THIS!!!!!
         """
         """Propogate the state using 4th order Runge-Kutta for equstion (1) in "MSCKF" paper"""
+        # update the imu state
         # compute norm of gyro
-        ...
+        norm_gyro = np.linalg.norm(gyro)
         
         # Get the Omega matrix, the equation above equation (2) in "MSCKF" paper
-        ...
-        
+        Omega_mat = np.zeros((4, 4))
+        Omega_mat[:3, :3] = -skew(gyro)
+        Omega_mat[:3, 3] = gyro
+        Omega_mat[3, :3] = -gyro
+
         # Get the orientation, velocity, position
-        ...
-        
+        q = self.state_server.imu_state.orientation
+        v = self.state_server.imu_state.velocity
+        p = self.state_server.imu_state.position
+
         # Compute the dq_dt, dq_dt2 in equation (1) in "MSCKF" paper
-        ...
-        
+        if norm_gyro > 1e-5:
+            dq_dt = (np.cos(norm_gyro*dt*0.5) * np.identity(4) +
+                np.sin(norm_gyro*dt*0.5)/norm_gyro * Omega_mat) @ q
+            dq_dt2 = (np.cos(norm_gyro*dt*0.25) * np.identity(4) +
+                np.sin(norm_gyro*dt*0.25)/norm_gyro * Omega_mat) @ q
+        else:
+            dq_dt = np.cos(norm_gyro*dt*0.5) * (np.identity(4) +
+                Omega_mat*dt*0.5) @ q
+            dq_dt2 = np.cos(norm_gyro*dt*0.25) * (np.identity(4) +
+                Omega_mat*dt*0.25) @ q
+
+        dR_dt_transpose = to_rotation(dq_dt).T
+        dR_dt2_transpose = to_rotation(dq_dt2).T
+
         # Apply 4th order Runge-Kutta 
         # k1 = f(tn, yn)
-        ...
+        k1_p_dot = v
+        k1_v_dot = to_rotation(q).T @ acc + IMUState.gravity
 
         # k2 = f(tn+dt/2, yn+k1*dt/2)
-        ...
+        k1_v = v + k1_v_dot*dt/2.
+        k2_p_dot = k1_v
+        k2_v_dot = dR_dt2_transpose @ acc + IMUState.gravity
         
         # k3 = f(tn+dt/2, yn+k2*dt/2)
-        ...
+        k2_v = v + k2_v_dot*dt/2
+        k3_p_dot = k2_v
+        k3_v_dot = dR_dt2_transpose @ acc + IMUState.gravity
         
         # k4 = f(tn+dt, yn+k3*dt)
-        ...
+        k3_v = v + k3_v_dot*dt
+        k4_p_dot = k3_v
+        k4_v_dot = dR_dt_transpose @ acc + IMUState.gravity
 
         # yn+1 = yn + dt/6*(k1+2*k2+2*k3+k4)
-        ...
+        q = dq_dt / np.linalg.norm(dq_dt)
+        v = v + (k1_v_dot + 2*k2_v_dot + 2*k3_v_dot + k4_v_dot)*dt/6.
+        p = p + (k1_p_dot + 2*k2_p_dot + 2*k3_p_dot + k4_p_dot)*dt/6.
 
-        # update the imu state
-        ...
+        self.state_server.imu_state.orientation = q
+        self.state_server.imu_state.velocity = v
+        self.state_server.imu_state.position = p
 
     
     def state_augmentation(self, time):
@@ -381,39 +476,73 @@ class MSCKF(object):
         """
         Compute the state covariance matrix in equation (3) in the "MSCKF" paper.
         """
-        # Get the imu_state, rotation from imu to cam0, and translation from cam0 to imu
-        ...
+        # Fix the covariance to be symmetric
+        imu_state = self.state_server.imu_state
+        R_i_c = imu_state.R_imu_cam0
+        t_c_i = imu_state.t_cam0_imu
 
         # Add a new camera state to the state server.
-        ...
-        
+        R_w_i = to_rotation(imu_state.orientation)
+        R_w_c = R_i_c @ R_w_i
+        t_c_w = imu_state.position + R_w_i.T @ t_c_i
+
+        cam_state = CAMState(imu_state.id)
+        cam_state.timestamp = time
+        cam_state.orientation = to_quaternion(R_w_c)
+        cam_state.position = t_c_w
+        cam_state.orientation_null = cam_state.orientation
+        cam_state.position_null = cam_state.position
+        self.state_server.cam_states[imu_state.id] = cam_state
 
         # Update the covariance matrix of the state.
         # To simplify computation, the matrix J below is the nontrivial block
         # Appendix B of "MSCKF" paper.
-        ...
+        J = np.zeros((6, 21))
+        J[:3, :3] = R_i_c
+        J[:3, 15:18] = np.identity(3)
+        J[3:6, :3] = skew(R_w_i.T @ t_c_i)
+        J[3:6, 12:15] = np.identity(3)
+        J[3:6, 18:21] = np.identity(3)
 
         # Resize the state covariance matrix.
-        ...
+        # old_rows, old_cols = self.state_server.state_cov.shape
+        old_size = self.state_server.state_cov.shape[0]   # symmetric
+        state_cov = np.zeros((old_size+6, old_size+6))
+        state_cov[:old_size, :old_size] = self.state_server.state_cov
 
         # Fill in the augmented state covariance.
-        ...
+        state_cov[old_size:, :old_size] = J @ state_cov[:21, :old_size]
+        state_cov[:old_size, old_size:] = state_cov[old_size:, :old_size].T
+        state_cov[old_size:, old_size:] = J @ state_cov[:21, :21] @ J.T
 
         # Fix the covariance to be symmetric
-        ...
+        self.state_server.state_cov = (state_cov + state_cov.T) / 2.
 
     def add_feature_observations(self, feature_msg):
         """
         IMPLEMENT THIS!!!!!
         """
         # get the current imu state id and number of current features
-        ...
-        
+        state_id = self.state_server.imu_state.id
+        curr_feature_num = len(self.map_server)
+        tracked_feature_num = 0
+
         # add all features in the feature_msg to self.map_server
-        ...
+        for feature in feature_msg.features:
+            if feature.id not in self.map_server:
+                # This is a new feature.
+                map_feature = Feature(feature.id, self.optimization_config)
+                map_feature.observations[state_id] = np.array([
+                    feature.u0, feature.v0, feature.u1, feature.v1])
+                self.map_server[feature.id] = map_feature
+            else:
+                # This is an old feature.
+                self.map_server[feature.id].observations[state_id] = np.array([
+                    feature.u0, feature.v0, feature.u1, feature.v1])
+                tracked_feature_num += 1
 
         # update the tracking rate
-        ...
+        self.tracking_rate = tracked_feature_num / (curr_feature_num+1e-5)
 
     def measurement_jacobian(self, cam_state_id, feature_id):
         """
@@ -532,41 +661,80 @@ class MSCKF(object):
     def measurement_update(self, H, r):
         """
         IMPLEMENT THIS!!!!!
+        Section III.B: by stacking multiple observations, we can compute the
+        residuals in equation (6) in "MSCKF" paper
         """
-        """
-        Section III.B: by stacking multiple observations, we can compute the residuals in equation (6) in "MSCKF" paper 
-        """
-        # Check if H and r are empty
-        ...
-
-        # Decompose the final Jacobian matrix to reduce computational
-        # complexity.
-        ...
-
-        # Compute the Kalman gain.
-        ...
-
-        # Compute the error of the state.
-        ...
-        
-        # Update the IMU state.
-        ...
-
-        # Update the camera states.
-        ...
-
         # Update state covariance.
-        ...
 
         # Fix the covariance to be symmetric
-        ...
+        if len(H) == 0 or len(r) == 0:
+            return
+
+        # Decompose the final Jacobian matrix to reduce computational
+        # complexity as in Equation (28), (29).
+        if H.shape[0] > H.shape[1]:
+            # QR decomposition
+            Q, R = np.linalg.qr(H, mode='reduced')  # if M > N, return (M, N), (N, N)
+            H_ = R         # shape (N, N)
+            r_ = Q.T @ r   # shape (N,)
+        else:
+            H_ = H   # shape (M, N)
+            r_ = r   # shape (M)
+
+        # Compute the Kalman gain.
+        P = self.state_server.state_cov
+        S = H_ @ P @ H_.T + (self.config.observation_noise *
+            np.identity(len(H_)))
+        K_transpose = np.linalg.solve(S, H_ @ P)
+        K = K_transpose.T   # shape (N, K)
+
+        # Compute the error of the state.
+        delta_x = K @ r_
+
+        # Update the IMU state.
+        delta_x_imu = delta_x[:21]
+
+        if (np.linalg.norm(delta_x_imu[6:9]) > 0.5 or 
+            np.linalg.norm(delta_x_imu[12:15]) > 1.0):
+            print('[Warning] Update change is too large')
+
+        dq_imu = small_angle_quaternion(delta_x_imu[:3])
+        imu_state = self.state_server.imu_state
+        imu_state.orientation = quaternion_multiplication(
+            dq_imu, imu_state.orientation)
+        imu_state.gyro_bias += delta_x_imu[3:6]
+        imu_state.velocity += delta_x_imu[6:9]
+        imu_state.acc_bias += delta_x_imu[9:12]
+        imu_state.position += delta_x_imu[12:15]
+
+        dq_extrinsic = small_angle_quaternion(delta_x_imu[15:18])
+        imu_state.R_imu_cam0 = to_rotation(dq_extrinsic) @ imu_state.R_imu_cam0
+        imu_state.t_cam0_imu += delta_x_imu[18:21]
+
+        # Update the camera states.
+        for i, (cam_id, cam_state) in enumerate(
+                self.state_server.cam_states.items()):
+            delta_x_cam = delta_x[21+i*6:27+i*6]
+            dq_cam = small_angle_quaternion(delta_x_cam[:3])
+            cam_state.orientation = quaternion_multiplication(
+                dq_cam, cam_state.orientation)
+            cam_state.position += delta_x_cam[3:]
+
+        # Update state covariance.
+        I_KH = np.identity(len(K)) - K @ H_
+        # state_cov = I_KH @ self.state_server.state_cov @ I_KH.T + (
+        #     K @ K.T * self.config.observation_noise)
+        state_cov = I_KH @ self.state_server.state_cov   # ?
+
+        # Fix the covariance to be symmetric
+        self.state_server.state_cov = (state_cov + state_cov.T) / 2.
 
     def gating_test(self, H, r, dof):
         P1 = H @ self.state_server.state_cov @ H.T
         P2 = self.config.observation_noise * np.identity(len(H))
         gamma = r @ np.linalg.solve(P1+P2, r)
 
-        if(gamma < self.chi_squared_test_table[dof]):
+        if gamma < self.chi_squared_test_table[dof]:
             return True
         else:
             return False
