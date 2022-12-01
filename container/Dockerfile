@@ -42,6 +42,7 @@ RUN apt-get install libglu1-mesa-dev freeglut3-dev mesa-common-dev -y
 RUN apt-get install libeigen3-dev -y
 RUN pip3 install cmake pyopengl
 COPY ./build_pangolin.sh /root/
+RUN /root/build_pangolin.sh
 RUN mkdir /usr/lib/python3.8/site-packages/
 ENV PYTHONPATH "${PYTHONPATH}:/usr/lib/python3.8/site-packages/"
 
