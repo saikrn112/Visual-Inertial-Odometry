@@ -1,2 +1,8 @@
 # Visual-Inertial-Odometry
-developing visual inertial odometry from scratch 
+Developing visual inertial odometry from scratch
+
+
+## Results
+<p float="middle">
+<img src="vio.gif"/>
+</p> 
